@@ -17,18 +17,16 @@ st.set_page_config(page_title="Stock Dashboard", page_icon="📈", layout="wide"
 
 st.markdown('''
 <style>
-    .hero { padding: 20px 0px; }
-    .kpi-card {
-        background: #1e2130;
-        border-radius: 12px;
-        padding: 16px;
-        text-align: center;
-        border: 1px solid #2e3250;
+    .main { background-color: #F8F9FA; }
+    h1 { color: #1B3A6B !important; }
+    h2, h3 { color: #1B3A6B !important; }
+    .stMetric { 
+        background: #FFFFFF; 
+        border-radius: 10px; 
+        padding: 10px;
+        border: 1px solid #e0e0e0;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
-    .positive { color: #00d4aa; font-weight: bold; }
-    .negative { color: #ff4b4b; font-weight: bold; }
-    .stMetric { background: #1e2130; border-radius: 10px; padding: 10px; }
-    footer { text-align: center; color: #888; margin-top: 40px; }
 </style>
 ''', unsafe_allow_html=True)
 
