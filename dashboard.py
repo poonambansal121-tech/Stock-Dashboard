@@ -44,6 +44,11 @@ with st.sidebar:
         'Latest News',
         'Stock Comparison',
         'Portfolio Tracker',
+        'Price Forecast',
+        'Correlation Heatmap',
+        'Monte Carlo',
+        'Stock Screener',
+        'Market Sentiment',
         'Market Overview'
     ])
     st.divider()
@@ -342,6 +347,249 @@ elif page == 'Market Overview':
                  use_container_width=True, height=400)
     csv = df_all.to_csv(index=False).encode('utf-8')
     st.download_button('Download as CSV', csv, 'market_overview.csv', 'text/csv')
+
+
+# ── PRICE FORECAST PAGE ──
+elif page == 'Price Forecast':
+    st.markdown('<div class="section-title">30-Day Price Forecast (ML)</div>', unsafe_allow_html=True)
+    st.caption("Uses Linear Regression on historical price trends. For educational purposes only.")
+    close = history['Close'].reset_index(drop=True)
+    X = np.array(range(len(close))).reshape(-1,1)
+    y = close.values
+    model = LinearRegression()
+    model.fit(X, y)
+    future_X = np.array(range(len(close), len(close)+30)).reshape(-1,1)
+    forecast = model.predict(future_X)
+    import plotly.graph_objects as go
+    fig_f = go.Figure()
+    fig_f.add_trace(go.Scatter(x=list(range(len(close))), y=close,
+        name='Historical', line=dict(color='#1B3A6B')))
+    fig_f.add_trace(go.Scatter(x=list(range(len(close), len(close)+30)), y=forecast,
+        name='Forecast', line=dict(color='#ff8c00', dash='dash')))
+    fig_f.add_vrect(x0=len(close)-1, x1=len(close)+29,
+        fillcolor='orange', opacity=0.05, line_width=0)
+    fig_f.update_layout(height=500, template='plotly_white',
+        title=f'{selected_ticker} — 30-Day Linear Forecast')
+    st.plotly_chart(fig_f, use_container_width=True)
+    current = close.iloc[-1]
+    predicted = forecast[-1]
+    direction = 'UP' if predicted > current else 'DOWN'
+    color = 'positive' if predicted > current else 'negative'
+    col_f1, col_f2, col_f3 = st.columns(3)
+    col_f1.metric('Current Price', f'${round(current,2)}')
+    col_f2.metric('30-Day Forecast', f'${round(predicted,2)}')
+    col_f3.metric('Expected Move', f'{round(((predicted-current)/current)*100,2)}%')
+    st.warning("This is a simple linear model for educational purposes. Not investment advice.")
+
+
+# ── CORRELATION HEATMAP PAGE ──
+elif page == 'Correlation Heatmap':
+    st.markdown('<div class="section-title">Stock Correlation Heatmap</div>', unsafe_allow_html=True)
+    st.caption("Values near +1 = move together | near -1 = move opposite | near 0 = no relationship")
+    corr_stocks = st.multiselect('Select Stocks', list(COMPANIES.keys()),
+        default=['Apple','Microsoft','Tesla','JPMorgan','Nike','Amazon'])
+    if len(corr_stocks) >= 2:
+        with st.spinner('Calculating correlations...'):
+            price_data = {}
+            for s in corr_stocks:
+                h = fetch_history(COMPANIES[s], period)
+                price_data[s] = h['Close']
+            df_corr = pd.DataFrame(price_data).pct_change().dropna()
+            corr_matrix = df_corr.corr()
+        import plotly.graph_objects as go
+        fig_c = go.Figure(data=go.Heatmap(
+            z=corr_matrix.values,
+            x=corr_matrix.columns.tolist(),
+            y=corr_matrix.index.tolist(),
+            colorscale='RdBu', zmid=0, zmin=-1, zmax=1,
+            text=corr_matrix.round(2).values,
+            texttemplate='%{text}',
+            textfont=dict(size=12),
+            hoverongaps=False
+        ))
+        fig_c.update_layout(height=500, template='plotly_white',
+            title='Return Correlation Matrix')
+        st.plotly_chart(fig_c, use_container_width=True)
+        st.subheader('What this means')
+        for i in range(len(corr_stocks)):
+            for j in range(i+1, len(corr_stocks)):
+                val = round(corr_matrix.iloc[i,j], 2)
+                s1, s2 = corr_stocks[i], corr_stocks[j]
+                if val > 0.7:
+                    st.write(f"**{s1} & {s2}**: Highly correlated ({val}) — move together")
+                elif val < -0.3:
+                    st.write(f"**{s1} & {s2}**: Negative correlation ({val}) — good for diversification")
+    else:
+        st.info('Select at least 2 stocks')
+
+
+# ── MONTE CARLO PAGE ──
+elif page == 'Monte Carlo':
+    st.markdown('<div class="section-title">Monte Carlo Portfolio Simulation</div>', unsafe_allow_html=True)
+    st.caption("Simulates 500 possible portfolio paths over the next 252 trading days (1 year)")
+    mc_stocks = st.multiselect('Select Portfolio Stocks', list(COMPANIES.keys()),
+        default=['Apple','Microsoft','JPMorgan','Nike'])
+    invest = st.number_input('Investment Amount ($)', 1000, 1000000, 10000, step=1000)
+    simulations = 500
+    days = 252
+    if mc_stocks and st.button('Run Simulation'):
+        with st.spinner('Running 500 simulations...'):
+            returns_list = []
+            for s in mc_stocks:
+                h = fetch_history(COMPANIES[s], '2y')['Close']
+                returns_list.append(h.pct_change().dropna())
+            df_ret = pd.concat(returns_list, axis=1).dropna()
+            df_ret.columns = mc_stocks
+            weights = np.array([1/len(mc_stocks)]*len(mc_stocks))
+            port_ret = df_ret.dot(weights)
+            mu  = port_ret.mean()
+            sig = port_ret.std()
+            import plotly.graph_objects as go
+            fig_m = go.Figure()
+            end_values = []
+            for i in range(simulations):
+                daily = np.random.normal(mu, sig, days)
+                path  = invest * np.cumprod(1 + daily)
+                end_values.append(path[-1])
+                color = 'rgba(27,58,107,0.04)'
+                fig_m.add_trace(go.Scatter(y=path, mode='lines',
+                    line=dict(color=color, width=1), showlegend=False))
+            p10 = round(np.percentile(end_values, 10), 2)
+            p50 = round(np.percentile(end_values, 50), 2)
+            p90 = round(np.percentile(end_values, 90), 2)
+            fig_m.update_layout(height=500, template='plotly_white',
+                title=f'Monte Carlo: {simulations} Simulations over {days} Days',
+                yaxis_title='Portfolio Value ($)', xaxis_title='Trading Days')
+            st.plotly_chart(fig_m, use_container_width=True)
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric('Initial Investment', f'${invest:,}')
+            c2.metric('Best Case (90th %)', f'${p90:,}')
+            c3.metric('Median Outcome', f'${p50:,}')
+            c4.metric('Worst Case (10th %)', f'${p10:,}')
+            gain = round(((p50-invest)/invest)*100, 1)
+            st.metric('Expected Return (median)', f'{gain}%')
+            st.warning("Monte Carlo simulation is for educational purposes only. Not investment advice.")
+
+
+# ── STOCK SCREENER PAGE ──
+elif page == 'Stock Screener':
+    st.markdown('<div class="section-title">Stock Screener</div>', unsafe_allow_html=True)
+    with st.spinner('Loading all stock data...'):
+        df_all = fetch_all_stocks()
+    st.subheader('Filter Stocks')
+    col_s1, col_s2, col_s3 = st.columns(3)
+    with col_s1:
+        max_pe = st.slider('Max PE Ratio', 0, 100, 50)
+        min_roe = st.slider('Min ROE (%)', -50, 100, 0)
+    with col_s2:
+        min_mktcap = st.slider('Min Market Cap ($B)', 0, 500, 0)
+        max_debt = st.slider('Max Debt/Equity', 0, 500, 300)
+    with col_s3:
+        min_margin = st.slider('Min Profit Margin (%)', -50, 100, 0)
+        min_div = st.slider('Min Dividend Yield (%)', 0, 10, 0)
+    filtered = df_all[
+        (df_all['PE Ratio'].between(0, max_pe) | (df_all['PE Ratio'] == 0)) &
+        (df_all['ROE (%)'] >= min_roe) &
+        (df_all['Market Cap $B'] >= min_mktcap) &
+        (df_all['Debt/Equity'] <= max_debt) &
+        (df_all['Profit Margin %'] >= min_margin) &
+        (df_all['Div Yield (%)'] >= min_div)
+    ]
+    st.markdown(f"**{len(filtered)} stocks match your criteria**")
+    show_cols = ['Company','Ticker','Price ($)','Change (%)','Market Cap $B',
+                 'PE Ratio','ROE (%)','Profit Margin %','Div Yield (%)','Analyst Rating']
+    st.dataframe(filtered[show_cols].sort_values('Market Cap $B', ascending=False),
+                 use_container_width=True, height=400)
+    if len(filtered) > 0:
+        csv = filtered.to_csv(index=False).encode('utf-8')
+        st.download_button('Download Screener Results', csv, 'screened_stocks.csv', 'text/csv')
+
+# ── MARKET SENTIMENT PAGE ──
+elif page == 'Market Sentiment':
+    st.markdown('<div class="section-title">Market Sentiment Overview</div>', unsafe_allow_html=True)
+    with st.spinner('Analyzing sentiment across all stocks...'):
+        df_all = fetch_all_stocks()
+    gainers = len(df_all[df_all['Change (%)'] > 0])
+    losers  = len(df_all[df_all['Change (%)'] < 0])
+    total   = len(df_all)
+    bullish_pct = round((gainers/total)*100)
+    import plotly.graph_objects as go
+    fig_sent = go.Figure(go.Indicator(
+        mode='gauge+number+delta',
+        value=bullish_pct,
+        domain={'x':[0,1],'y':[0,1]},
+        title={'text':'Market Sentiment (% Stocks Up Today)'},
+        gauge={
+            'axis':{'range':[0,100]},
+            'bar':{'color':'#1B3A6B'},
+            'steps':[
+                {'range':[0,30],  'color':'#ff4b4b'},
+                {'range':[30,60], 'color':'#ffd700'},
+                {'range':[60,100],'color':'#00d4aa'},
+            ],
+            'threshold':{'line':{'color':'black','width':4},'thickness':0.75,'value':50}
+        }
+    ))
+    fig_sent.update_layout(height=400, template='plotly_white')
+    st.plotly_chart(fig_sent, use_container_width=True)
+    c1, c2, c3 = st.columns(3)
+    c1.metric('Stocks Up Today',   gainers, f'{bullish_pct}%')
+    c2.metric('Stocks Down Today', losers,  f'{100-bullish_pct}%')
+    label = 'BULLISH' if bullish_pct > 60 else 'BEARISH' if bullish_pct < 40 else 'NEUTRAL'
+    c3.metric('Overall Signal', label)
+    st.divider()
+    st.subheader('Sentiment by Sector')
+    if 'Sector' in df_all.columns:
+        sector_sent = df_all.groupby('Sector')['Change (%)'].mean().sort_values(ascending=False)
+        st.bar_chart(sector_sent)
+
+
+# ── MONTE CARLO PAGE ──
+elif page == 'Monte Carlo':
+    st.markdown('<div class="section-title">Monte Carlo Portfolio Simulation</div>', unsafe_allow_html=True)
+    st.caption("Simulates 500 possible portfolio paths over the next 252 trading days (1 year)")
+    mc_stocks = st.multiselect('Select Portfolio Stocks', list(COMPANIES.keys()),
+        default=['Apple','Microsoft','JPMorgan','Nike'])
+    invest = st.number_input('Investment Amount ($)', 1000, 1000000, 10000, step=1000)
+    simulations = 500
+    days = 252
+    if mc_stocks and st.button('Run Simulation'):
+        with st.spinner('Running 500 simulations...'):
+            returns_list = []
+            for s in mc_stocks:
+                h = fetch_history(COMPANIES[s], '2y')['Close']
+                returns_list.append(h.pct_change().dropna())
+            df_ret = pd.concat(returns_list, axis=1).dropna()
+            df_ret.columns = mc_stocks
+            weights = np.array([1/len(mc_stocks)]*len(mc_stocks))
+            port_ret = df_ret.dot(weights)
+            mu  = port_ret.mean()
+            sig = port_ret.std()
+            import plotly.graph_objects as go
+            fig_m = go.Figure()
+            end_values = []
+            for i in range(simulations):
+                daily = np.random.normal(mu, sig, days)
+                path  = invest * np.cumprod(1 + daily)
+                end_values.append(path[-1])
+                color = 'rgba(27,58,107,0.04)'
+                fig_m.add_trace(go.Scatter(y=path, mode='lines',
+                    line=dict(color=color, width=1), showlegend=False))
+            p10 = round(np.percentile(end_values, 10), 2)
+            p50 = round(np.percentile(end_values, 50), 2)
+            p90 = round(np.percentile(end_values, 90), 2)
+            fig_m.update_layout(height=500, template='plotly_white',
+                title=f'Monte Carlo: {simulations} Simulations over {days} Days',
+                yaxis_title='Portfolio Value ($)', xaxis_title='Trading Days')
+            st.plotly_chart(fig_m, use_container_width=True)
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric('Initial Investment', f'${invest:,}')
+            c2.metric('Best Case (90th %)', f'${p90:,}')
+            c3.metric('Median Outcome', f'${p50:,}')
+            c4.metric('Worst Case (10th %)', f'${p10:,}')
+            gain = round(((p50-invest)/invest)*100, 1)
+            st.metric('Expected Return (median)', f'{gain}%')
+            st.warning("Monte Carlo simulation is for educational purposes only. Not investment advice.")
 
 # ── FOOTER ──
 st.markdown('<br><hr>', unsafe_allow_html=True)
