@@ -1,9 +1,8 @@
 yfinance
 pandas
-matplotlib
-openpyxl
 streamlit
 pytz
 plotly
 textblob
 scikit-learn
+numpy
