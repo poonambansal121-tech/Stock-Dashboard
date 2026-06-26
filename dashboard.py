@@ -220,12 +220,29 @@ st.markdown('''
 
 col_mode, col_pick, col_period = st.columns([1, 2, 1])
 with col_mode:
-    mode = st.radio('Pick Stock', ['From List', 'Enter Any Ticker'], horizontal=True)
+    mode = st.radio('Pick Stock', ['From List', 'Search by Name'], horizontal=True)
 with col_pick:
-    if mode == 'Enter Any Ticker':
-        custom = st.text_input('Ticker Symbol (e.g. GOOGL, V, META)', '').upper().strip()
-        selected_ticker  = custom if custom else 'AAPL'
-        selected_company = selected_ticker
+    if mode == 'Search by Name':
+        query = st.text_input('Company name or ticker (e.g. Apple, Tesla, GOOGL)', '').strip()
+        selected_ticker  = 'AAPL'
+        selected_company = 'Apple Inc.'
+        if query:
+            try:
+                results = yf.Search(query, max_results=8).quotes
+                equities = [r for r in results if r.get('quoteType') in ('EQUITY', 'ETF') and r.get('symbol')]
+                if equities:
+                    opts = {
+                        f"{r.get('shortname') or r.get('longname') or r['symbol']} ({r['symbol']})": r['symbol']
+                        for r in equities
+                    }
+                    choice = st.selectbox('Select from results', list(opts.keys()))
+                    selected_ticker  = opts[choice]
+                    selected_company = choice
+                else:
+                    st.caption('No results — try a different name or check spelling.')
+            except Exception:
+                selected_ticker  = query.upper()
+                selected_company = query.upper()
     else:
         selected_company = st.selectbox('Select Company', list(COMPANIES.keys()))
         selected_ticker  = COMPANIES[selected_company]
@@ -727,7 +744,7 @@ elif page == 'Market Sentiment':
     bullish_pct = round((gainers/total)*100)
     gauge_color = '#00c878' if bullish_pct >= 60 else '#ff4b4b' if bullish_pct < 40 else '#f59e0b'
     fig_sent = go.Figure(go.Indicator(
-        mode='gauge+number+delta',
+        mode='gauge+number',
         value=bullish_pct,
         domain={'x':[0,1],'y':[0,1]},
         title={'text':'Market Sentiment (% Stocks Up Today)', 'font':{'color':'#aaa'}},
@@ -754,4 +771,42 @@ elif page == 'Market Sentiment':
     c3.metric('Overall Signal', label)
     st.markdown('<hr>', unsafe_allow_html=True)
     if 'Sector' in df_all.columns:
-        st.markdo
+        st.markdown('<div class="yf-section">Sector Breakdown</div>', unsafe_allow_html=True)
+        sector_grp = df_all.groupby('Sector')['Change (%)'].mean().sort_values()
+        colors = ['#00c878' if v >= 0 else '#ff4b4b' for v in sector_grp.values]
+        fig_sec = go.Figure(go.Bar(
+            x=sector_grp.values, y=sector_grp.index, orientation='h',
+            marker_color=colors, text=[f'{v:+.2f}%' for v in sector_grp.values],
+            textposition='outside'
+        ))
+        fig_sec.update_layout(height=400, paper_bgcolor='#111', plot_bgcolor='#111',
+                              font=dict(color='#aaa'), xaxis=dict(showgrid=False),
+                              yaxis=dict(color='#aaa'), margin=dict(l=10,r=60,t=10,b=10))
+        st.plotly_chart(fig_sec, use_container_width=True)
+
+# ── MARKET OVERVIEW PAGE ──────────────────────────────────────────────────────
+elif page == 'Market Overview':
+    import plotly.graph_objects as go
+    st.markdown('<div class="yf-section">Market Overview</div>', unsafe_allow_html=True)
+    indices = {'^GSPC':'S&P 500','^DJI':'Dow Jones','^IXIC':'NASDAQ','^RUT':'Russell 2000'}
+    cols_idx = st.columns(4)
+    for col, (sym, name) in zip(cols_idx, indices.items()):
+        try:
+            t   = yf.Ticker(sym)
+            inf = t.fast_info
+            px  = round(inf.last_price, 2)
+            pc  = round(inf.previous_close, 2)
+            chg = round(((px-pc)/pc)*100, 2)
+            clr = '#00c878' if chg >= 0 else '#ff4b4b'
+            arr = '▲' if chg >= 0 else '▼'
+            with col:
+                st.markdown(f'''
+                <div style="background:#141414;border:1px solid #222;border-radius:12px;
+                            padding:16px 14px;text-align:center">
+                    <div style="font-size:10px;color:#aaa;text-transform:uppercase;
+                                letter-spacing:0.7px;margin-bottom:4px">{name}</div>
+                    <div style="font-size:22px;font-weight:800;color:#fff">{px:,.2f}</div>
+                    <div style="font-size:13px;color:{clr};font-weight:700">{arr} {abs(chg):.2f}%</div>
+                </div>''', unsafe_allow_html=True)
+        except Exception:
+            pass
