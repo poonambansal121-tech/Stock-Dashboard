@@ -411,6 +411,7 @@ elif page == 'Historical Price':
     show_vol = st.checkbox('Volume Bars', True)
     fig = candlestick_chart(history, show_sma20, show_sma50,
                             show_sma200, show_ema, show_bb, show_vol)
+    fig.update_layout(**DARK_LAYOUT)
     st.plotly_chart(fig, use_container_width=True)
     st.markdown('<div class="yf-section">Price Statistics</div>', unsafe_allow_html=True)
     col_s1, col_s2, col_s3, col_s4 = st.columns(4)
@@ -429,6 +430,7 @@ elif page == 'Technical Indicators':
     with col_t1: show_rsi  = st.checkbox('RSI (14)',  True)
     with col_t2: show_macd = st.checkbox('MACD',      True)
     fig = indicator_chart(history, show_rsi, show_macd)
+    fig.update_layout(**DARK_LAYOUT)
     st.plotly_chart(fig, use_container_width=True)
     st.caption('RSI > 70 = Overbought | RSI < 30 = Oversold | MACD cross = Buy/Sell signal')
 
@@ -532,7 +534,9 @@ elif page == 'Stock Comparison':
         for c in selected_comps:
             h = fetch_history(COMPANIES[c], period)
             stock_data[c] = h['Close']
-        st.plotly_chart(comparison_chart(stock_data), use_container_width=True)
+        fig_comp = comparison_chart(stock_data)
+        fig_comp.update_layout(**DARK_LAYOUT)
+        st.plotly_chart(fig_comp, use_container_width=True)
         st.markdown('<div class="yf-section">Returns Comparison</div>', unsafe_allow_html=True)
         returns = []
         for c, prices in stock_data.items():
