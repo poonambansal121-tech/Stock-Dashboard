@@ -84,7 +84,7 @@ section[data-testid="stSidebar"] hr { border-color: #333 !important; }
     transition: border-color 0.2s;
 }
 .yf-kpi:hover { border-color: #6001d2; }
-.yf-kpi-label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.6px; }
+.yf-kpi-label { font-size: 10px; color: #aaa; text-transform: uppercase; letter-spacing: 0.6px; }
 .yf-kpi-value { font-size: 17px; font-weight: 700; color: #fff; margin-top: 3px; }
 
 /* ── Section title ── */
@@ -296,34 +296,62 @@ st.markdown('<hr>', unsafe_allow_html=True)
 # ── OVERVIEW PAGE ─────────────────────────────────────────────────────────────
 if page == 'Overview':
     st.markdown('<div class="yf-section">Market Snapshot</div>', unsafe_allow_html=True)
-    c1,c2,c3,c4,c5,c6 = st.columns(6)
-    c1.metric('Price',        f'${price}',   f'{pct}%')
-    c2.metric('Market Cap',   format_number(mktcap,'$'))
-    c3.metric('52W High',     f'${high52}')
-    c4.metric('52W Low',      f'${low52}')
-    c5.metric('Target Price', f'${target}')
-    c6.metric('Analyst',      rating)
-    st.markdown('<hr>', unsafe_allow_html=True)
-    col1, col2 = st.columns([2,1])
+
+    # ── Snapshot cards ────────────────────────────────────────────
+    pct_color  = "#00c878" if pct >= 0 else "#ff4b4b"
+    pct_arrow  = "▲" if pct >= 0 else "▼"
+    rat_color  = "#00c878" if rating in ("BUY","STRONG_BUY") else "#ff4b4b" if rating in ("SELL","STRONG_SELL") else "#f59e0b"
+
+    snap_cards = [
+        ("Current Price",  f"${price:,.2f}",           f'<span style="color:{pct_color};font-size:12px">{pct_arrow} {abs(pct):.2f}%</span>'),
+        ("Market Cap",     format_number(mktcap,"$"),   ""),
+        ("52-Week High",   f"${high52:,.2f}",           ""),
+        ("52-Week Low",    f"${low52:,.2f}",            ""),
+        ("Analyst Target", f"${target:,.2f}",           ""),
+        ("Analyst Rating", rating,                      f'<span style="color:{rat_color}">{rating}</span>'),
+    ]
+    cols_snap = st.columns(6)
+    for col, (label, val, sub) in zip(cols_snap, snap_cards):
+        with col:
+            st.markdown(f"""
+            <div style="background:#141414;border:1px solid #2a2a2a;border-radius:12px;
+                        padding:16px 14px;text-align:center">
+                <div style="font-size:10px;color:#aaa;text-transform:uppercase;
+                            letter-spacing:0.7px;margin-bottom:6px">{label}</div>
+                <div style="font-size:20px;font-weight:800;color:#fff">{val}</div>
+                <div style="margin-top:4px;min-height:16px">{sub}</div>
+            </div>""", unsafe_allow_html=True)
+
+    st.markdown('<div style="margin:20px 0"></div>', unsafe_allow_html=True)
+
+    # ── Chart + Key Metrics ───────────────────────────────────────
+    col1, col2 = st.columns([3, 1])
     with col1:
         st.markdown('<div class="yf-section">Price Chart</div>', unsafe_allow_html=True)
         fig = candlestick_chart(history)
         st.plotly_chart(fig, use_container_width=True)
     with col2:
         st.markdown('<div class="yf-section">Key Metrics</div>', unsafe_allow_html=True)
-        metrics = {
-            'PE Ratio':      pe,
-            'Beta':          beta,
-            'Div Yield':     f'{div}%',
-            'EPS':           f'${info.get("trailingEps",0)}',
-            'Revenue':       format_number(info.get('totalRevenue',0),'$'),
-            'Profit Margin': f'{round(info.get("profitMargins",0)*100,2)}%',
-            'ROE':           f'{round(info.get("returnOnEquity",0)*100,2)}%',
-            'Debt/Equity':   round(info.get('debtToEquity',0),2),
-        }
-        for k,v in metrics.items():
-            st.markdown(f'<div class="yf-kpi"><div class="yf-kpi-label">{k}</div><div class="yf-kpi-value">{v}</div></div>',
-                        unsafe_allow_html=True)
+        metrics = [
+            ("PE Ratio",      pe),
+            ("Beta",          beta),
+            ("Div Yield",     f"{div}%"),
+            ("EPS",           f'${info.get("trailingEps",0)}'),
+            ("Revenue",       format_number(info.get("totalRevenue",0),"$")),
+            ("Profit Margin", f'{round(info.get("profitMargins",0)*100,2)}%'),
+            ("ROE",           f'{round(info.get("returnOnEquity",0)*100,2)}%'),
+            ("Debt / Equity", round(info.get("debtToEquity",0),2)),
+        ]
+        for k, v in metrics:
+            st.markdown(f"""
+            <div style="background:#141414;border:1px solid #2a2a2a;border-radius:10px;
+                        padding:10px 14px;margin-bottom:8px;display:flex;
+                        justify-content:space-between;align-items:center">
+                <span style="font-size:11px;color:#aaa;text-transform:uppercase;
+                             letter-spacing:0.5px">{k}</span>
+                <span style="font-size:14px;font-weight:700;color:#fff">{v}</span>
+            </div>""", unsafe_allow_html=True)
+
     csv = history.to_csv().encode('utf-8')
     st.download_button('⬇ Download Price Data as CSV',
                        csv, f'{selected_ticker}_prices.csv', 'text/csv')
@@ -700,30 +728,4 @@ elif page == 'Market Sentiment':
     c3.metric('Overall Signal', label)
     st.markdown('<hr>', unsafe_allow_html=True)
     if 'Sector' in df_all.columns:
-        st.markdown('<div class="yf-section">Sentiment by Sector</div>', unsafe_allow_html=True)
-        sector_sent = df_all.groupby('Sector')['Change (%)'].mean().sort_values(ascending=False)
-        st.bar_chart(sector_sent)
-
-# ── MARKET OVERVIEW PAGE ──────────────────────────────────────────────────────
-elif page == 'Market Overview':
-    st.markdown('<div class="yf-section">Market Overview</div>', unsafe_allow_html=True)
-    with st.spinner('Loading market data...'):
-        df_all = fetch_all_stocks()
-    col_g, col_l = st.columns(2)
-    with col_g:
-        st.markdown('<div class="yf-section">🟢 Top Gainers</div>', unsafe_allow_html=True)
-        for _,row in df_all.nlargest(5,'Change (%)').iterrows():
-            st.metric(row['Company'], f"${row['Price ($)']}", f"+{row['Change (%)']}%")
-    with col_l:
-        st.markdown('<div class="yf-section">🔴 Top Losers</div>', unsafe_allow_html=True)
-        for _,row in df_all.nsmallest(5,'Change (%)').iterrows():
-            st.metric(row['Company'], f"${row['Price ($)']}", f"{row['Change (%)']}%")
-    st.markdown('<hr>', unsafe_allow_html=True)
-    st.markdown('<div class="yf-section">All Companies</div>', unsafe_allow_html=True)
-    overview = df_all[['Company','Ticker','Price ($)','Change (%)','Market Cap $B','PE Ratio','Analyst Rating']]
-    st.dataframe(overview.style.map(color_value, subset=['Change (%)']),
-                 use_container_width=True, height=400)
-    csv = df_all.to_csv(index=False).encode('utf-8')
-    st.download_button('⬇ Download as CSV', csv, 'market_overview.csv', 'text/csv')
-
-# ── FOOTER ──────────────────────────────────�
+        st.markdo
