@@ -160,6 +160,19 @@ hr { border-color: #222 !important; }
     border-color: #333 !important;
     border-radius: 8px !important;
 }
+
+/* ── White labels in company-selection bar ── */
+.stRadio label,
+.stRadio [data-baseweb="radio"] + div,
+.stRadio > div > label,
+div[data-testid="stRadio"] label,
+div[data-testid="stRadio"] > label { color: #fff !important; }
+div[data-testid="stRadio"] p { color: #fff !important; }
+.stTextInput label, .stTextInput label p { color: #fff !important; }
+.stSelectbox label, .stSelectbox label p { color: #fff !important; }
+.stSlider label, .stSlider label p { color: #fff !important; }
+[data-testid="stSelectSlider"] label,
+[data-testid="stSelectSlider"] label p { color: #fff !important; }
 </style>
 ''', unsafe_allow_html=True)
 
@@ -306,23 +319,24 @@ st.markdown('<hr>', unsafe_allow_html=True)
 
 # ── OVERVIEW PAGE ─────────────────────────────────────────────────────────────
 if page == 'Overview':
-    st.markdown('<div class="yf-section">Market Snapshot</div>', unsafe_allow_html=True)
+    st.markdown('<div class="yf-section">Financial Snapshot</div>', unsafe_allow_html=True)
 
-    # ── Snapshot cards ────────────────────────────────────────────
-    pct_color  = "#00c878" if pct >= 0 else "#ff4b4b"
-    pct_arrow  = "▲" if pct >= 0 else "▼"
-    rat_color  = "#00c878" if rating in ("BUY","STRONG_BUY") else "#ff4b4b" if rating in ("SELL","STRONG_SELL") else "#f59e0b"
+    # ── Financial fundamentals (unique from Quick Stats above) ────
+    vol         = info.get('volume', 0)
+    avg_vol     = info.get('averageVolume', 0)
+    profit_m    = round(info.get('profitMargins', 0) * 100, 2)
+    eps_val     = info.get('trailingEps', 0)
 
-    snap_cards = [
-        ("Current Price",  f"${price:,.2f}",           f'<span style="color:{pct_color};font-size:12px">{pct_arrow} {abs(pct):.2f}%</span>'),
-        ("Market Cap",     format_number(mktcap,"$"),   ""),
-        ("52-Week High",   f"${high52:,.2f}",           ""),
-        ("52-Week Low",    f"${low52:,.2f}",            ""),
-        ("Analyst Target", f"${target:,.2f}",           ""),
-        ("Analyst Rating", rating,                      f'<span style="color:{rat_color}">{rating}</span>'),
+    fin_cards = [
+        ("PE Ratio",       f"{pe}x"             if pe else "N/A",   ""),
+        ("EPS (TTM)",      f"${eps_val}"         if eps_val else "N/A", ""),
+        ("Beta",           str(beta)             if beta else "N/A", ""),
+        ("Div Yield",      f"{div}%"             if div else "N/A",  ""),
+        ("Volume",         format_number(vol,""), ""),
+        ("Profit Margin",  f"{profit_m}%"        if profit_m else "N/A", ""),
     ]
     cols_snap = st.columns(6)
-    for col, (label, val, sub) in zip(cols_snap, snap_cards):
+    for col, (label, val, sub) in zip(cols_snap, fin_cards):
         with col:
             st.markdown(f"""
             <div style="background:#141414;border:1px solid #2a2a2a;border-radius:12px;
@@ -340,6 +354,7 @@ if page == 'Overview':
     with col1:
         st.markdown('<div class="yf-section">Price Chart</div>', unsafe_allow_html=True)
         fig = candlestick_chart(history)
+        fig.update_layout(**DARK_LAYOUT)
         st.plotly_chart(fig, use_container_width=True)
     with col2:
         st.markdown('<div class="yf-section">Key Metrics</div>', unsafe_allow_html=True)
