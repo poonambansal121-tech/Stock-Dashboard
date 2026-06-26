@@ -47,8 +47,14 @@ with st.sidebar:
         'Market Overview'
     ])
     st.divider()
-    selected_company = st.selectbox('Select Company', list(COMPANIES.keys()))
-    selected_ticker  = COMPANIES[selected_company]
+    mode = st.radio('Pick Stock', ['From List', 'Enter Any Ticker'], horizontal=True)
+    if mode == 'Enter Any Ticker':
+        custom = st.text_input('Ticker Symbol (e.g. GOOGL, V, META)', '').upper().strip()
+        selected_ticker  = custom if custom else 'AAPL'
+        selected_company = selected_ticker
+    else:
+        selected_company = st.selectbox('Select Company', list(COMPANIES.keys()))
+        selected_ticker  = COMPANIES[selected_company]
     period = st.select_slider('Time Period',
         options=['1mo','3mo','6mo','1y','2y','5y'], value='1y')
     st.divider()
