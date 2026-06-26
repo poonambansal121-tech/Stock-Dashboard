@@ -268,28 +268,39 @@ chg_cls     = 'yf-change-up' if pct >= 0 else 'yf-change-down'
 arrow       = '▲' if pct >= 0 else '▼'
 mkt_time    = now.strftime('%b %d, %Y · %I:%M %p CST')
 
-col_h1, col_h2 = st.columns([3, 1])
-with col_h1:
-    if logo:
-        st.image(logo, width=48)
-    st.markdown(f'''
-    <div class="yf-hero">
-        <div class="yf-company-name">{selected_company} · {exchange}</div>
-        <div class="yf-sector-line">{sector} | {industry} | {city}, {state}</div>
-        <div style="display:flex;align-items:baseline;gap:16px;margin-top:10px">
-            <div class="yf-price">${price:,.2f}</div>
-            <div class="{chg_cls}">{arrow} {abs(change):.2f} ({abs(pct):.2f}%)</div>
-        </div>
-        <div class="yf-timestamp">Currency in USD · {mkt_time}</div>
+# Hero — full width
+if logo:
+    st.image(logo, width=48)
+st.markdown(f'''
+<div class="yf-hero">
+    <div class="yf-company-name">{selected_company} · {exchange}</div>
+    <div class="yf-sector-line">{sector} | {industry} | {city}, {state}</div>
+    <div style="display:flex;align-items:baseline;gap:16px;margin-top:10px">
+        <div class="yf-price">${price:,.2f}</div>
+        <div class="{chg_cls}">{arrow} {abs(change):.2f} ({abs(pct):.2f}%)</div>
     </div>
-    ''', unsafe_allow_html=True)
-with col_h2:
-    st.markdown('<div class="yf-section">Quick Stats</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="yf-kpi"><div class="yf-kpi-label">Market Cap</div><div class="yf-kpi-value">{format_number(mktcap,"$")}</div></div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="yf-kpi"><div class="yf-kpi-label">52W High</div><div class="yf-kpi-value">${high52}</div></div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="yf-kpi"><div class="yf-kpi-label">52W Low</div><div class="yf-kpi-value">${low52}</div></div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="yf-kpi"><div class="yf-kpi-label">Analyst Target</div><div class="yf-kpi-value">${target}</div></div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="yf-kpi"><div class="yf-kpi-label">Rating</div><div class="yf-kpi-value" style="color:#6001d2">{rating}</div></div>', unsafe_allow_html=True)
+    <div class="yf-timestamp">Currency in USD · {mkt_time}</div>
+</div>
+''', unsafe_allow_html=True)
+
+# Quick Stats — horizontal row of 5 cards
+st.markdown('<div class="yf-section">Quick Stats</div>', unsafe_allow_html=True)
+rat_color = "#00c878" if rating in ("BUY","STRONG_BUY") else "#ff4b4b" if rating in ("SELL","STRONG_SELL") else "#f59e0b"
+qs_cols = st.columns(5)
+qs_data = [
+    ("Market Cap",     format_number(mktcap, "$"), "#fff"),
+    ("52-Week High",   f"${high52:,.2f}",          "#fff"),
+    ("52-Week Low",    f"${low52:,.2f}",            "#fff"),
+    ("Analyst Target", f"${target:,.2f}",           "#fff"),
+    ("Rating",         rating,                      rat_color),
+]
+for col, (label, val, color) in zip(qs_cols, qs_data):
+    with col:
+        st.markdown(f'''
+        <div class="yf-kpi" style="text-align:center">
+            <div class="yf-kpi-label">{label}</div>
+            <div class="yf-kpi-value" style="color:{color}">{val}</div>
+        </div>''', unsafe_allow_html=True)
 
 st.markdown('<hr>', unsafe_allow_html=True)
 
