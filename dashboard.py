@@ -187,61 +187,36 @@ DARK_LAYOUT = dict(
     margin=dict(l=10, r=10, t=40, b=10),
 )
 
-# ── RESILIENT DATA FETCHERS ───────────────────────────────────────────────────
-# Wrap the raw data.py calls with retries + backoff + caching. This won't fix a
-# bug inside data.py itself, but it protects the app from transient Yahoo Finance
-# rate-limiting (very common on Streamlit Cloud's shared IPs) and, importantly,
-# surfaces the REAL exception instead of a silent generic error.
+# ── DATA FETCHERS ─────────────────────────────────────────────────────────────
+# data.py already retries with backoff internally (it has to, since that's
+# where the actual Yahoo session lives). These wrappers do NOT retry again —
+# stacking retries here on top of data.py's retries was causing a single flaky
+# call to snowball into up to 9 attempts and 60+ seconds of waiting. All these
+# do now is validate the result and fail fast with a clear error if it's empty.
 
-RETRY_ATTEMPTS = 3
-RETRY_BASE_DELAY = 1.5  # seconds, multiplied by attempt number
-
-
-def _retry(fn, *args, validate=None, **kwargs):
-    """Call fn(*args, **kwargs) with retries. `validate` is an optional function
-    that receives the result and raises/returns False if the result should be
-    treated as a failure (e.g. an empty DataFrame or empty dict)."""
-    last_err = None
-    for attempt in range(1, RETRY_ATTEMPTS + 1):
-        try:
-            result = fn(*args, **kwargs)
-            if validate is not None and not validate(result):
-                raise ValueError(f'Empty or invalid result from {fn.__name__}{args}')
-            return result
-        except Exception as e:
-            last_err = e
-            if attempt < RETRY_ATTEMPTS:
-                time.sleep(RETRY_BASE_DELAY * attempt)
-    raise last_err
-
-
-@st.cache_data(ttl=300, show_spinner=False)
 def safe_fetch_history(ticker, period):
-    return _retry(
-        fetch_history, ticker, period,
-        validate=lambda df: df is not None and not df.empty
-    )
+    df = fetch_history(ticker, period)
+    if df is None or df.empty:
+        raise ValueError(f'Empty history returned for {ticker}')
+    return df
 
 
-@st.cache_data(ttl=300, show_spinner=False)
 def safe_fetch_info(ticker):
-    return _retry(
-        fetch_info, ticker,
-        validate=lambda d: isinstance(d, dict) and len(d) > 1
-    )
+    info = fetch_info(ticker)
+    if not isinstance(info, dict) or len(info) <= 1:
+        raise ValueError(f'Empty info returned for {ticker}')
+    return info
 
 
-@st.cache_data(ttl=300, show_spinner=False)
 def safe_fetch_news(ticker):
-    return _retry(fetch_news, ticker)
+    return fetch_news(ticker)
 
 
-@st.cache_data(ttl=600, show_spinner=False)
 def safe_fetch_all_stocks():
-    return _retry(
-        fetch_all_stocks,
-        validate=lambda df: df is not None and not df.empty
-    )
+    df = fetch_all_stocks()
+    if df is None or df.empty:
+        raise ValueError('Empty stock universe returned')
+    return df
 
 
 # ── SIDEBAR ──────────────────────────────────────────────────────────────────
@@ -346,8 +321,8 @@ if not data_ok:
     with st.expander('Show technical error details'):
         st.exception(load_error)
     if st.button('🔁 Retry'):
-        safe_fetch_history.clear()
-        safe_fetch_info.clear()
+        fetch_history.clear()
+        fetch_info.clear()
         st.rerun()
     st.stop()
 
