@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import pytz
+import time
 from datetime import datetime
 from sklearn.linear_model import LinearRegression
 from config import COMPANIES, DEFAULT_PERIOD
@@ -186,6 +187,63 @@ DARK_LAYOUT = dict(
     margin=dict(l=10, r=10, t=40, b=10),
 )
 
+# ── RESILIENT DATA FETCHERS ───────────────────────────────────────────────────
+# Wrap the raw data.py calls with retries + backoff + caching. This won't fix a
+# bug inside data.py itself, but it protects the app from transient Yahoo Finance
+# rate-limiting (very common on Streamlit Cloud's shared IPs) and, importantly,
+# surfaces the REAL exception instead of a silent generic error.
+
+RETRY_ATTEMPTS = 3
+RETRY_BASE_DELAY = 1.5  # seconds, multiplied by attempt number
+
+
+def _retry(fn, *args, validate=None, **kwargs):
+    """Call fn(*args, **kwargs) with retries. `validate` is an optional function
+    that receives the result and raises/returns False if the result should be
+    treated as a failure (e.g. an empty DataFrame or empty dict)."""
+    last_err = None
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            result = fn(*args, **kwargs)
+            if validate is not None and not validate(result):
+                raise ValueError(f'Empty or invalid result from {fn.__name__}{args}')
+            return result
+        except Exception as e:
+            last_err = e
+            if attempt < RETRY_ATTEMPTS:
+                time.sleep(RETRY_BASE_DELAY * attempt)
+    raise last_err
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def safe_fetch_history(ticker, period):
+    return _retry(
+        fetch_history, ticker, period,
+        validate=lambda df: df is not None and not df.empty
+    )
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def safe_fetch_info(ticker):
+    return _retry(
+        fetch_info, ticker,
+        validate=lambda d: isinstance(d, dict) and len(d) > 1
+    )
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def safe_fetch_news(ticker):
+    return _retry(fetch_news, ticker)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def safe_fetch_all_stocks():
+    return _retry(
+        fetch_all_stocks,
+        validate=lambda df: df is not None and not df.empty
+    )
+
+
 # ── SIDEBAR ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown('## 📈 StockPro')
@@ -252,11 +310,17 @@ with col_period:
 
 st.markdown('</div>', unsafe_allow_html=True)
 
+if not selected_ticker:
+    st.warning('Please select or search for a valid ticker.')
+    st.stop()
+
 # ── LOAD DATA ────────────────────────────────────────────────────────────────
 with st.spinner('Fetching data...'):
+    data_ok = False
+    load_error = None
     try:
-        history = fetch_history(selected_ticker, period)
-        info    = fetch_info(selected_ticker)
+        history = safe_fetch_history(selected_ticker, period)
+        info    = safe_fetch_info(selected_ticker)
         price    = info.get('currentPrice', 0)
         prev     = info.get('previousClose', price)
         change   = round(price - prev, 2)
@@ -271,10 +335,20 @@ with st.spinner('Fetching data...'):
         beta     = round(info.get('beta', 0), 2)
         data_ok  = True
     except Exception as e:
-        st.error(f'Could not load data for {selected_ticker}. Please try again.')
-        data_ok = False
+        load_error = e
 
 if not data_ok:
+    st.error(f'Could not load data for **{selected_ticker}**.')
+    st.caption(
+        'This is usually one of: Yahoo Finance rate-limiting Streamlit Cloud\'s '
+        'shared servers, an invalid/delisted ticker, or a transient network hiccup.'
+    )
+    with st.expander('Show technical error details'):
+        st.exception(load_error)
+    if st.button('🔁 Retry'):
+        safe_fetch_history.clear()
+        safe_fetch_info.clear()
+        st.rerun()
     st.stop()
 
 # ── NAVBAR ────────────────────────────────────────────────────────────────────
@@ -437,25 +511,30 @@ elif page == 'Technical Indicators':
 # ── FINANCIAL METRICS PAGE ────────────────────────────────────────────────────
 elif page == 'Financial Metrics':
     st.markdown('<div class="yf-section">Financial Metrics</div>', unsafe_allow_html=True)
-    with st.spinner('Loading all company data...'):
-        df_all = fetch_all_stocks()
-    t1,t2,t3 = st.tabs(['Valuation','Profitability','Financial Health'])
-    with t1:
-        val_df = df_all[['Company','PE Ratio','Forward PE','PB Ratio','EPS ($)','Target Price ($)','Analyst Rating']]
-        st.dataframe(val_df, use_container_width=True, height=400)
-        st.caption('PE=Price/Earnings | PB=Price/Book | Forward PE uses estimated future earnings')
-    with t2:
-        prof_df = df_all[['Company','Revenue $B','Profit Margin %','Gross Margin %','ROE (%)','ROA (%)']]
-        st.dataframe(prof_df.style.map(color_value,
-            subset=['Profit Margin %','Gross Margin %','ROE (%)','ROA (%)']),
-            use_container_width=True, height=400)
-    with t3:
-        health_df = df_all[['Company','Debt/Equity','Current Ratio','Quick Ratio','Beta','Div Yield (%)']]
-        st.dataframe(health_df, use_container_width=True, height=400)
-        st.caption('Current Ratio > 1 = Healthy | Beta > 1 = More volatile than market')
-    csv = df_all.to_csv(index=False).encode('utf-8')
-    st.download_button('⬇ Download All Metrics as CSV',
-                       csv, 'all_stocks.csv', 'text/csv')
+    try:
+        with st.spinner('Loading all company data...'):
+            df_all = safe_fetch_all_stocks()
+        t1,t2,t3 = st.tabs(['Valuation','Profitability','Financial Health'])
+        with t1:
+            val_df = df_all[['Company','PE Ratio','Forward PE','PB Ratio','EPS ($)','Target Price ($)','Analyst Rating']]
+            st.dataframe(val_df, use_container_width=True, height=400)
+            st.caption('PE=Price/Earnings | PB=Price/Book | Forward PE uses estimated future earnings')
+        with t2:
+            prof_df = df_all[['Company','Revenue $B','Profit Margin %','Gross Margin %','ROE (%)','ROA (%)']]
+            st.dataframe(prof_df.style.map(color_value,
+                subset=['Profit Margin %','Gross Margin %','ROE (%)','ROA (%)']),
+                use_container_width=True, height=400)
+        with t3:
+            health_df = df_all[['Company','Debt/Equity','Current Ratio','Quick Ratio','Beta','Div Yield (%)']]
+            st.dataframe(health_df, use_container_width=True, height=400)
+            st.caption('Current Ratio > 1 = Healthy | Beta > 1 = More volatile than market')
+        csv = df_all.to_csv(index=False).encode('utf-8')
+        st.download_button('⬇ Download All Metrics as CSV',
+                           csv, 'all_stocks.csv', 'text/csv')
+    except Exception as e:
+        st.error('Could not load the full stock universe (likely Yahoo Finance rate-limiting).')
+        with st.expander('Show technical error details'):
+            st.exception(e)
 
 # ── COMPANY INFO PAGE ─────────────────────────────────────────────────────────
 elif page == 'Company Info':
@@ -483,7 +562,7 @@ elif page == 'Company Info':
 elif page == 'Latest News':
     st.markdown('<div class="yf-section">Latest News & Sentiment</div>', unsafe_allow_html=True)
     try:
-        news_items = fetch_news(selected_ticker)
+        news_items = safe_fetch_news(selected_ticker)
         scores = []
         for article in news_items:
             content = article.get('content',{})
@@ -521,8 +600,10 @@ elif page == 'Latest News':
             <div class="yf-kpi-value" style="color:{overall_color}">{overall} · Score: {round(avg,3)}</div>
         </div>
         ''', unsafe_allow_html=True)
-    except:
+    except Exception as e:
         st.warning('News not available right now. Please try again later.')
+        with st.expander('Show technical error details'):
+            st.exception(e)
 
 # ── COMPARISON PAGE ───────────────────────────────────────────────────────────
 elif page == 'Stock Comparison':
@@ -530,22 +611,27 @@ elif page == 'Stock Comparison':
     selected_comps = st.multiselect('Select Companies',
         list(COMPANIES.keys()), default=['Nike','Apple','Microsoft'])
     if selected_comps:
-        stock_data = {}
-        for c in selected_comps:
-            h = fetch_history(COMPANIES[c], period)
-            stock_data[c] = h['Close']
-        fig_comp = comparison_chart(stock_data)
-        fig_comp.update_layout(**DARK_LAYOUT)
-        st.plotly_chart(fig_comp, use_container_width=True)
-        st.markdown('<div class="yf-section">Returns Comparison</div>', unsafe_allow_html=True)
-        returns = []
-        for c, prices in stock_data.items():
-            ret = round(((prices.iloc[-1]-prices.iloc[0])/prices.iloc[0])*100,2)
-            vol = round(prices.pct_change().std()*(252**0.5)*100, 2)
-            returns.append({'Company':c,'Return (%)':ret,'Volatility (%)':vol})
-        ret_df = pd.DataFrame(returns).sort_values('Return (%)',ascending=False)
-        st.dataframe(ret_df, use_container_width=True)
-        st.bar_chart(ret_df.set_index('Company')['Return (%)'])
+        try:
+            stock_data = {}
+            for c in selected_comps:
+                h = safe_fetch_history(COMPANIES[c], period)
+                stock_data[c] = h['Close']
+            fig_comp = comparison_chart(stock_data)
+            fig_comp.update_layout(**DARK_LAYOUT)
+            st.plotly_chart(fig_comp, use_container_width=True)
+            st.markdown('<div class="yf-section">Returns Comparison</div>', unsafe_allow_html=True)
+            returns = []
+            for c, prices in stock_data.items():
+                ret = round(((prices.iloc[-1]-prices.iloc[0])/prices.iloc[0])*100,2)
+                vol = round(prices.pct_change().std()*(252**0.5)*100, 2)
+                returns.append({'Company':c,'Return (%)':ret,'Volatility (%)':vol})
+            ret_df = pd.DataFrame(returns).sort_values('Return (%)',ascending=False)
+            st.dataframe(ret_df, use_container_width=True)
+            st.bar_chart(ret_df.set_index('Company')['Return (%)'])
+        except Exception as e:
+            st.error('Could not load comparison data for one or more selected stocks.')
+            with st.expander('Show technical error details'):
+                st.exception(e)
 
 # ── PORTFOLIO PAGE ────────────────────────────────────────────────────────────
 elif page == 'Portfolio Tracker':
@@ -563,26 +649,31 @@ elif page == 'Portfolio Tracker':
                 weights.append(w)
         total = sum(weights)
         if total == 100:
-            port_returns, port_vols = [], []
-            details = []
-            for stock, w in zip(port_stocks, weights):
-                h = fetch_history(COMPANIES[stock], '1y')['Close']
-                ret = ((h.iloc[-1]-h.iloc[0])/h.iloc[0])*100
-                vol = h.pct_change().std()*(252**0.5)*100
-                port_returns.append(ret * w/100)
-                port_vols.append(vol * w/100)
-                details.append({'Stock':stock,'Weight (%)':w,
-                                 'Return (%)':round(ret,2),
-                                 'Contribution (%)':round(ret*w/100,2)})
-            total_ret = round(sum(port_returns),2)
-            total_vol = round(sum(port_vols),2)
-            sharpe    = round(total_ret/total_vol,2) if total_vol else 0
-            c1,c2,c3 = st.columns(3)
-            c1.metric('Portfolio Return (1Y)', f'{total_ret}%')
-            c2.metric('Portfolio Volatility',  f'{total_vol}%')
-            c3.metric('Sharpe Ratio',          sharpe)
-            st.dataframe(pd.DataFrame(details), use_container_width=True)
-            st.bar_chart(pd.DataFrame(details).set_index('Stock')['Weight (%)'])
+            try:
+                port_returns, port_vols = [], []
+                details = []
+                for stock, w in zip(port_stocks, weights):
+                    h = safe_fetch_history(COMPANIES[stock], '1y')['Close']
+                    ret = ((h.iloc[-1]-h.iloc[0])/h.iloc[0])*100
+                    vol = h.pct_change().std()*(252**0.5)*100
+                    port_returns.append(ret * w/100)
+                    port_vols.append(vol * w/100)
+                    details.append({'Stock':stock,'Weight (%)':w,
+                                     'Return (%)':round(ret,2),
+                                     'Contribution (%)':round(ret*w/100,2)})
+                total_ret = round(sum(port_returns),2)
+                total_vol = round(sum(port_vols),2)
+                sharpe    = round(total_ret/total_vol,2) if total_vol else 0
+                c1,c2,c3 = st.columns(3)
+                c1.metric('Portfolio Return (1Y)', f'{total_ret}%')
+                c2.metric('Portfolio Volatility',  f'{total_vol}%')
+                c3.metric('Sharpe Ratio',          sharpe)
+                st.dataframe(pd.DataFrame(details), use_container_width=True)
+                st.bar_chart(pd.DataFrame(details).set_index('Stock')['Weight (%)'])
+            except Exception as e:
+                st.error('Could not load data for one or more holdings.')
+                with st.expander('Show technical error details'):
+                    st.exception(e)
         else:
             st.warning(f'Weights must add to 100%. Currently: {total}%')
 
@@ -625,34 +716,39 @@ elif page == 'Correlation Heatmap':
     corr_stocks = st.multiselect('Select Stocks', list(COMPANIES.keys()),
         default=['Apple','Microsoft','Tesla','JPMorgan','Nike','Amazon'])
     if len(corr_stocks) >= 2:
-        with st.spinner('Calculating correlations...'):
-            price_data = {}
-            for s in corr_stocks:
-                h = fetch_history(COMPANIES[s], period)
-                price_data[s] = h['Close']
-            df_corr = pd.DataFrame(price_data).pct_change().dropna()
-            corr_matrix = df_corr.corr()
-        fig_c = go.Figure(data=go.Heatmap(
-            z=corr_matrix.values,
-            x=corr_matrix.columns.tolist(),
-            y=corr_matrix.index.tolist(),
-            colorscale='RdBu', zmid=0, zmin=-1, zmax=1,
-            text=corr_matrix.round(2).values,
-            texttemplate='%{text}',
-            textfont=dict(size=12),
-            hoverongaps=False
-        ))
-        fig_c.update_layout(height=500, title='Return Correlation Matrix', **DARK_LAYOUT)
-        st.plotly_chart(fig_c, use_container_width=True)
-        st.markdown('<div class="yf-section">Interpretation</div>', unsafe_allow_html=True)
-        for i in range(len(corr_stocks)):
-            for j in range(i+1, len(corr_stocks)):
-                val = round(corr_matrix.iloc[i,j], 2)
-                s1, s2 = corr_stocks[i], corr_stocks[j]
-                if val > 0.7:
-                    st.write(f"**{s1} & {s2}**: Highly correlated ({val}) — move together")
-                elif val < -0.3:
-                    st.write(f"**{s1} & {s2}**: Negative correlation ({val}) — good for diversification")
+        try:
+            with st.spinner('Calculating correlations...'):
+                price_data = {}
+                for s in corr_stocks:
+                    h = safe_fetch_history(COMPANIES[s], period)
+                    price_data[s] = h['Close']
+                df_corr = pd.DataFrame(price_data).pct_change().dropna()
+                corr_matrix = df_corr.corr()
+            fig_c = go.Figure(data=go.Heatmap(
+                z=corr_matrix.values,
+                x=corr_matrix.columns.tolist(),
+                y=corr_matrix.index.tolist(),
+                colorscale='RdBu', zmid=0, zmin=-1, zmax=1,
+                text=corr_matrix.round(2).values,
+                texttemplate='%{text}',
+                textfont=dict(size=12),
+                hoverongaps=False
+            ))
+            fig_c.update_layout(height=500, title='Return Correlation Matrix', **DARK_LAYOUT)
+            st.plotly_chart(fig_c, use_container_width=True)
+            st.markdown('<div class="yf-section">Interpretation</div>', unsafe_allow_html=True)
+            for i in range(len(corr_stocks)):
+                for j in range(i+1, len(corr_stocks)):
+                    val = round(corr_matrix.iloc[i,j], 2)
+                    s1, s2 = corr_stocks[i], corr_stocks[j]
+                    if val > 0.7:
+                        st.write(f"**{s1} & {s2}**: Highly correlated ({val}) — move together")
+                    elif val < -0.3:
+                        st.write(f"**{s1} & {s2}**: Negative correlation ({val}) — good for diversification")
+        except Exception as e:
+            st.error('Could not compute correlations for the selected stocks.')
+            with st.expander('Show technical error details'):
+                st.exception(e)
     else:
         st.info('Select at least 2 stocks')
 
@@ -667,126 +763,141 @@ elif page == 'Monte Carlo':
     simulations = 500
     days = 252
     if mc_stocks and st.button('▶ Run Simulation'):
-        with st.spinner('Running 500 simulations...'):
-            returns_list = []
-            for s in mc_stocks:
-                h = fetch_history(COMPANIES[s], '2y')['Close']
-                returns_list.append(h.pct_change().dropna())
-            df_ret = pd.concat(returns_list, axis=1).dropna()
-            df_ret.columns = mc_stocks
-            weights = np.array([1/len(mc_stocks)]*len(mc_stocks))
-            port_ret = df_ret.dot(weights)
-            mu  = port_ret.mean()
-            sig = port_ret.std()
-            fig_m = go.Figure()
-            end_values = []
-            for i in range(simulations):
-                daily = np.random.normal(mu, sig, days)
-                path  = invest * np.cumprod(1 + daily)
-                end_values.append(path[-1])
-                fig_m.add_trace(go.Scatter(y=path, mode='lines',
-                    line=dict(color='rgba(96,1,210,0.05)', width=1), showlegend=False))
-            p10 = round(np.percentile(end_values, 10), 2)
-            p50 = round(np.percentile(end_values, 50), 2)
-            p90 = round(np.percentile(end_values, 90), 2)
-            fig_m.update_layout(height=500,
-                title=f'Monte Carlo: {simulations} Simulations over {days} Days',
-                yaxis_title='Portfolio Value ($)', xaxis_title='Trading Days',
-                **DARK_LAYOUT)
-            st.plotly_chart(fig_m, use_container_width=True)
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric('Initial Investment',  f'${invest:,}')
-            c2.metric('Best Case (90th %)',  f'${p90:,}')
-            c3.metric('Median Outcome',      f'${p50:,}')
-            c4.metric('Worst Case (10th %)', f'${p10:,}')
-            gain = round(((p50-invest)/invest)*100, 1)
-            st.metric('Expected Return (median)', f'{gain}%')
-            st.warning("Monte Carlo simulation is for educational purposes only. Not investment advice.")
+        try:
+            with st.spinner('Running 500 simulations...'):
+                returns_list = []
+                for s in mc_stocks:
+                    h = safe_fetch_history(COMPANIES[s], '2y')['Close']
+                    returns_list.append(h.pct_change().dropna())
+                df_ret = pd.concat(returns_list, axis=1).dropna()
+                df_ret.columns = mc_stocks
+                weights = np.array([1/len(mc_stocks)]*len(mc_stocks))
+                port_ret = df_ret.dot(weights)
+                mu  = port_ret.mean()
+                sig = port_ret.std()
+                fig_m = go.Figure()
+                end_values = []
+                for i in range(simulations):
+                    daily = np.random.normal(mu, sig, days)
+                    path  = invest * np.cumprod(1 + daily)
+                    end_values.append(path[-1])
+                    fig_m.add_trace(go.Scatter(y=path, mode='lines',
+                        line=dict(color='rgba(96,1,210,0.05)', width=1), showlegend=False))
+                p10 = round(np.percentile(end_values, 10), 2)
+                p50 = round(np.percentile(end_values, 50), 2)
+                p90 = round(np.percentile(end_values, 90), 2)
+                fig_m.update_layout(height=500,
+                    title=f'Monte Carlo: {simulations} Simulations over {days} Days',
+                    yaxis_title='Portfolio Value ($)', xaxis_title='Trading Days',
+                    **DARK_LAYOUT)
+                st.plotly_chart(fig_m, use_container_width=True)
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric('Initial Investment',  f'${invest:,}')
+                c2.metric('Best Case (90th %)',  f'${p90:,}')
+                c3.metric('Median Outcome',      f'${p50:,}')
+                c4.metric('Worst Case (10th %)', f'${p10:,}')
+                gain = round(((p50-invest)/invest)*100, 1)
+                st.metric('Expected Return (median)', f'{gain}%')
+                st.warning("Monte Carlo simulation is for educational purposes only. Not investment advice.")
+        except Exception as e:
+            st.error('Simulation failed — could not load data for one or more selected stocks.')
+            with st.expander('Show technical error details'):
+                st.exception(e)
 
 # ── STOCK SCREENER PAGE ───────────────────────────────────────────────────────
 elif page == 'Stock Screener':
     st.markdown('<div class="yf-section">Stock Screener</div>', unsafe_allow_html=True)
-    with st.spinner('Loading all stock data...'):
-        df_all = fetch_all_stocks()
-    col_s1, col_s2, col_s3 = st.columns(3)
-    with col_s1:
-        max_pe   = st.slider('Max PE Ratio',        0, 100, 50)
-        min_roe  = st.slider('Min ROE (%)',        -50, 100,  0)
-    with col_s2:
-        min_mktcap = st.slider('Min Market Cap ($B)', 0, 500,   0)
-        max_debt   = st.slider('Max Debt/Equity',     0, 500, 300)
-    with col_s3:
-        min_margin = st.slider('Min Profit Margin (%)', -50, 100, 0)
-        min_div    = st.slider('Min Dividend Yield (%)',  0,  10,  0)
-    filtered = df_all[
-        (df_all['PE Ratio'].between(0, max_pe) | (df_all['PE Ratio'] == 0)) &
-        (df_all['ROE (%)'] >= min_roe) &
-        (df_all['Market Cap $B'] >= min_mktcap) &
-        (df_all['Debt/Equity'] <= max_debt) &
-        (df_all['Profit Margin %'] >= min_margin) &
-        (df_all['Div Yield (%)'] >= min_div)
-    ]
-    st.markdown(f'<div class="yf-kpi"><div class="yf-kpi-label">Matching Stocks</div><div class="yf-kpi-value">{len(filtered)}</div></div>',
-                unsafe_allow_html=True)
-    show_cols = ['Company','Ticker','Price ($)','Change (%)','Market Cap $B',
-                 'PE Ratio','ROE (%)','Profit Margin %','Div Yield (%)','Analyst Rating']
-    st.dataframe(filtered[show_cols].sort_values('Market Cap $B', ascending=False),
-                 use_container_width=True, height=400)
-    if len(filtered) > 0:
-        csv = filtered.to_csv(index=False).encode('utf-8')
-        st.download_button('⬇ Download Screener Results', csv, 'screened_stocks.csv', 'text/csv')
+    try:
+        with st.spinner('Loading all stock data...'):
+            df_all = safe_fetch_all_stocks()
+        col_s1, col_s2, col_s3 = st.columns(3)
+        with col_s1:
+            max_pe   = st.slider('Max PE Ratio',        0, 100, 50)
+            min_roe  = st.slider('Min ROE (%)',        -50, 100,  0)
+        with col_s2:
+            min_mktcap = st.slider('Min Market Cap ($B)', 0, 500,   0)
+            max_debt   = st.slider('Max Debt/Equity',     0, 500, 300)
+        with col_s3:
+            min_margin = st.slider('Min Profit Margin (%)', -50, 100, 0)
+            min_div    = st.slider('Min Dividend Yield (%)',  0,  10,  0)
+        filtered = df_all[
+            (df_all['PE Ratio'].between(0, max_pe) | (df_all['PE Ratio'] == 0)) &
+            (df_all['ROE (%)'] >= min_roe) &
+            (df_all['Market Cap $B'] >= min_mktcap) &
+            (df_all['Debt/Equity'] <= max_debt) &
+            (df_all['Profit Margin %'] >= min_margin) &
+            (df_all['Div Yield (%)'] >= min_div)
+        ]
+        st.markdown(f'<div class="yf-kpi"><div class="yf-kpi-label">Matching Stocks</div><div class="yf-kpi-value">{len(filtered)}</div></div>',
+                    unsafe_allow_html=True)
+        show_cols = ['Company','Ticker','Price ($)','Change (%)','Market Cap $B',
+                     'PE Ratio','ROE (%)','Profit Margin %','Div Yield (%)','Analyst Rating']
+        st.dataframe(filtered[show_cols].sort_values('Market Cap $B', ascending=False),
+                     use_container_width=True, height=400)
+        if len(filtered) > 0:
+            csv = filtered.to_csv(index=False).encode('utf-8')
+            st.download_button('⬇ Download Screener Results', csv, 'screened_stocks.csv', 'text/csv')
+    except Exception as e:
+        st.error('Could not load the stock universe for screening (likely Yahoo Finance rate-limiting).')
+        with st.expander('Show technical error details'):
+            st.exception(e)
 
 # ── MARKET SENTIMENT PAGE ─────────────────────────────────────────────────────
 elif page == 'Market Sentiment':
     st.markdown('<div class="yf-section">Market Sentiment Overview</div>', unsafe_allow_html=True)
     import plotly.graph_objects as go
-    with st.spinner('Analyzing sentiment across all stocks...'):
-        df_all = fetch_all_stocks()
-    gainers     = len(df_all[df_all['Change (%)'] > 0])
-    losers      = len(df_all[df_all['Change (%)'] < 0])
-    total       = len(df_all)
-    bullish_pct = round((gainers/total)*100)
-    gauge_color = '#00c878' if bullish_pct >= 60 else '#ff4b4b' if bullish_pct < 40 else '#f59e0b'
-    fig_sent = go.Figure(go.Indicator(
-        mode='gauge+number',
-        value=bullish_pct,
-        domain={'x':[0,1],'y':[0,1]},
-        title={'text':'Market Sentiment (% Stocks Up Today)', 'font':{'color':'#aaa'}},
-        number={'font':{'color':'#fff','size':48}},
-        gauge={
-            'axis':{'range':[0,100], 'tickcolor':'#444'},
-            'bar':{'color': gauge_color},
-            'bgcolor':'#1a1a1a',
-            'bordercolor':'#333',
-            'steps':[
-                {'range':[0,30],  'color':'rgba(255,75,75,0.15)'},
-                {'range':[30,60], 'color':'rgba(245,158,11,0.15)'},
-                {'range':[60,100],'color':'rgba(0,200,120,0.15)'},
-            ],
-            'threshold':{'line':{'color':'#fff','width':3},'thickness':0.75,'value':50}
-        }
-    ))
-    fig_sent.update_layout(height=380, paper_bgcolor='#111', font=dict(color='#aaa'))
-    st.plotly_chart(fig_sent, use_container_width=True)
-    c1, c2, c3 = st.columns(3)
-    c1.metric('Stocks Up Today',   gainers, f'{bullish_pct}%')
-    c2.metric('Stocks Down Today', losers,  f'{100-bullish_pct}%')
-    label = 'BULLISH 🟢' if bullish_pct > 60 else 'BEARISH 🔴' if bullish_pct < 40 else 'NEUTRAL 🟡'
-    c3.metric('Overall Signal', label)
-    st.markdown('<hr>', unsafe_allow_html=True)
-    if 'Sector' in df_all.columns:
-        st.markdown('<div class="yf-section">Sector Breakdown</div>', unsafe_allow_html=True)
-        sector_grp = df_all.groupby('Sector')['Change (%)'].mean().sort_values()
-        colors = ['#00c878' if v >= 0 else '#ff4b4b' for v in sector_grp.values]
-        fig_sec = go.Figure(go.Bar(
-            x=sector_grp.values, y=sector_grp.index, orientation='h',
-            marker_color=colors, text=[f'{v:+.2f}%' for v in sector_grp.values],
-            textposition='outside'
+    try:
+        with st.spinner('Analyzing sentiment across all stocks...'):
+            df_all = safe_fetch_all_stocks()
+        gainers     = len(df_all[df_all['Change (%)'] > 0])
+        losers      = len(df_all[df_all['Change (%)'] < 0])
+        total       = len(df_all)
+        bullish_pct = round((gainers/total)*100) if total else 0
+        gauge_color = '#00c878' if bullish_pct >= 60 else '#ff4b4b' if bullish_pct < 40 else '#f59e0b'
+        fig_sent = go.Figure(go.Indicator(
+            mode='gauge+number',
+            value=bullish_pct,
+            domain={'x':[0,1],'y':[0,1]},
+            title={'text':'Market Sentiment (% Stocks Up Today)', 'font':{'color':'#aaa'}},
+            number={'font':{'color':'#fff','size':48}},
+            gauge={
+                'axis':{'range':[0,100], 'tickcolor':'#444'},
+                'bar':{'color': gauge_color},
+                'bgcolor':'#1a1a1a',
+                'bordercolor':'#333',
+                'steps':[
+                    {'range':[0,30],  'color':'rgba(255,75,75,0.15)'},
+                    {'range':[30,60], 'color':'rgba(245,158,11,0.15)'},
+                    {'range':[60,100],'color':'rgba(0,200,120,0.15)'},
+                ],
+                'threshold':{'line':{'color':'#fff','width':3},'thickness':0.75,'value':50}
+            }
         ))
-        fig_sec.update_layout(height=400, paper_bgcolor='#111', plot_bgcolor='#111',
-                              font=dict(color='#aaa'), xaxis=dict(showgrid=False),
-                              yaxis=dict(color='#aaa'), margin=dict(l=10,r=60,t=10,b=10))
-        st.plotly_chart(fig_sec, use_container_width=True)
+        fig_sent.update_layout(height=380, paper_bgcolor='#111', font=dict(color='#aaa'))
+        st.plotly_chart(fig_sent, use_container_width=True)
+        c1, c2, c3 = st.columns(3)
+        c1.metric('Stocks Up Today',   gainers, f'{bullish_pct}%')
+        c2.metric('Stocks Down Today', losers,  f'{100-bullish_pct}%')
+        label = 'BULLISH 🟢' if bullish_pct > 60 else 'BEARISH 🔴' if bullish_pct < 40 else 'NEUTRAL 🟡'
+        c3.metric('Overall Signal', label)
+        st.markdown('<hr>', unsafe_allow_html=True)
+        if 'Sector' in df_all.columns:
+            st.markdown('<div class="yf-section">Sector Breakdown</div>', unsafe_allow_html=True)
+            sector_grp = df_all.groupby('Sector')['Change (%)'].mean().sort_values()
+            colors = ['#00c878' if v >= 0 else '#ff4b4b' for v in sector_grp.values]
+            fig_sec = go.Figure(go.Bar(
+                x=sector_grp.values, y=sector_grp.index, orientation='h',
+                marker_color=colors, text=[f'{v:+.2f}%' for v in sector_grp.values],
+                textposition='outside'
+            ))
+            fig_sec.update_layout(height=400, paper_bgcolor='#111', plot_bgcolor='#111',
+                                  font=dict(color='#aaa'), xaxis=dict(showgrid=False),
+                                  yaxis=dict(color='#aaa'), margin=dict(l=10,r=60,t=10,b=10))
+            st.plotly_chart(fig_sec, use_container_width=True)
+    except Exception as e:
+        st.error('Could not load market-wide sentiment data (likely Yahoo Finance rate-limiting).')
+        with st.expander('Show technical error details'):
+            st.exception(e)
 
 # ── MARKET OVERVIEW PAGE ──────────────────────────────────────────────────────
 elif page == 'Market Overview':
@@ -794,6 +905,7 @@ elif page == 'Market Overview':
     st.markdown('<div class="yf-section">Market Overview</div>', unsafe_allow_html=True)
     indices = {'^GSPC':'S&P 500','^DJI':'Dow Jones','^IXIC':'NASDAQ','^RUT':'Russell 2000'}
     cols_idx = st.columns(4)
+    any_failed = False
     for col, (sym, name) in zip(cols_idx, indices.items()):
         try:
             t   = yf.Ticker(sym)
@@ -813,4 +925,14 @@ elif page == 'Market Overview':
                     <div style="font-size:13px;color:{clr};font-weight:700">{arr} {abs(chg):.2f}%</div>
                 </div>''', unsafe_allow_html=True)
         except Exception:
-            pass
+            any_failed = True
+            with col:
+                st.markdown(f'''
+                <div style="background:#141414;border:1px solid #222;border-radius:12px;
+                            padding:16px 14px;text-align:center">
+                    <div style="font-size:10px;color:#aaa;text-transform:uppercase;
+                                letter-spacing:0.7px;margin-bottom:4px">{name}</div>
+                    <div style="font-size:14px;color:#666">Unavailable</div>
+                </div>''', unsafe_allow_html=True)
+    if any_failed:
+        st.caption('Some indices could not be loaded — Yahoo Finance may be rate-limiting this server. Try again shortly.')
