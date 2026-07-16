@@ -24,9 +24,12 @@ def _get_ticker(ticker: str) -> yf.Ticker:
     return yf.Ticker(ticker, session=_session)
 
 
-def _with_retry(fn, retries=3, base_delay=6):
-    """Retry with longer backoff + jitter. Yahoo's rate-limit window tends to
-    be tens of seconds, so short/immediate retries just get limited again."""
+def _with_retry(fn, retries=2, base_delay=2):
+    """Retry with backoff + jitter. Kept short: with a shared warm session the
+    first attempt should almost always succeed, so this is just a safety net
+    against a single transient failure, not a long grind against a hard limit.
+    If Yahoo is genuinely rate-limiting the IP, more/longer retries just delay
+    the same failure — better to fail fast and let the user see why."""
     last_err = None
     for attempt in range(1, retries + 1):
         try:
@@ -34,7 +37,7 @@ def _with_retry(fn, retries=3, base_delay=6):
         except Exception as e:
             last_err = e
             if attempt < retries:
-                time.sleep(base_delay * attempt + random.uniform(0, 2))
+                time.sleep(base_delay * attempt + random.uniform(0, 1))
     raise last_err
 
 
@@ -67,7 +70,7 @@ def fetch_all_stocks() -> pd.DataFrame:
     data = []
     for name, ticker in COMPANIES.items():
         try:
-            info = _with_retry(lambda t=ticker: _get_ticker(t).info, retries=2, base_delay=4)
+            info = _with_retry(lambda t=ticker: _get_ticker(t).info, retries=2, base_delay=2)
             price = info.get('currentPrice', 0)
             prev  = info.get('previousClose', price)
             chg   = round(price - prev, 2)
@@ -104,9 +107,10 @@ def fetch_all_stocks() -> pd.DataFrame:
                 'Logo':             info.get('logo_url',''),
                 'Description':      info.get('longBusinessSummary','N/A'),
             })
-            # Slower, jittered pacing between tickers so this loop doesn't read
-            # as a burst of automated requests.
-            time.sleep(1.5 + random.uniform(0, 1.5))
+            # Small jittered pause between tickers — the crumb is fetched once
+            # for the shared session, so this loop no longer needs the heavy
+            # per-ticker delay that repeated re-authentication used to require.
+            time.sleep(0.4 + random.uniform(0, 0.4))
         except Exception:
             continue
     return pd.DataFrame(data)
